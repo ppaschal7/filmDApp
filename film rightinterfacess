@@ -1,0 +1,269 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title IScreenplayBase
+ * @dev Base interface for screenplay-related structs
+ */
+interface IScreenplayBase {
+    struct ScreenplayMetadata {
+        string title;
+        string registrationNumber;
+        address originalAuthor;
+        uint256 creationDate;
+        bool isOriginal;
+        uint256 parentWorkId;
+        string logline;
+        string genre;
+    }
+
+    struct VersionData {
+        string versionHash;
+        uint256 timestamp;
+        address submitter;
+        string versionNotes;
+    }
+}
+
+/**
+ * @title IScreenplayRights
+ * @dev Interface for the main screenplay rights contract
+ */
+interface IScreenplayRights is IScreenplayBase {
+    event ScreenplayRegistered(uint256 indexed screenplayId, string title, address author);
+    event OptionCreated(uint256 indexed optionId, uint256 screenplayId, address holder);
+    event OptionExercised(uint256 indexed optionId, uint256 screenplayId);
+    event RewriteCommissioned(uint256 indexed rewriteId, uint256 screenplayId, address writer);
+    event VersionAdded(uint256 indexed screenplayId, string versionHash, uint256 versionNumber);
+
+    function registerScreenplay(
+        string memory title,
+        string memory registrationNumber,
+        string memory logline,
+        string memory genre,
+        bool isOriginal,
+        uint256 parentWorkId
+    ) external returns (uint256);
+
+    function createOption(
+        uint256 screenplayId,
+        address optionHolder,
+        uint256 durationDays,
+        uint256 purchasePrice,
+        bool isExclusive
+    ) external returns (uint256);
+
+    function exerciseOption(uint256 optionId) external payable;
+
+    function commissionRewrite(
+        uint256 screenplayId,
+        address writer,
+        string memory rewriteType,
+        uint256 deadlineDays
+    ) external returns (uint256);
+
+    function addVersion(
+        uint256 screenplayId,
+        string memory versionHash
+    ) external;
+
+    function getScreenplayMetadata(uint256 screenplayId) 
+        external view returns (ScreenplayMetadata memory);
+
+    function getVersionHistory(uint256 screenplayId)
+        external view returns (VersionData[] memory);
+
+    function isAuthorizedRewriter(uint256 screenplayId, address writer)
+        external view returns (bool);
+}
+
+/**
+ * @title IScreenplayCoverage
+ * @dev Interface for screenplay coverage functionality
+ */
+interface IScreenplayCoverage {
+    struct CoverageReport {
+        uint256 screenplayId;
+        address reader;
+        string coverageHash;
+        uint256 submissionDate;
+        uint8 rating;
+        bool isConfidential;
+    }
+
+    struct ElementScores {
+        string element;
+        uint8 score;
+    }
+
+    event CoverageSubmitted(uint256 indexed screenplayId, address reader, string coverageHash);
+    event ReaderAuthorized(address reader);
+    event ReaderRevoked(address reader);
+
+    function submitCoverage(
+        uint256 screenplayId,
+        string memory coverageHash,
+        uint8 rating,
+        bool isConfidential
+    ) external;
+
+    function addElementScore(
+        uint256 screenplayId,
+        uint256 coverageIndex,
+        string memory element,
+        uint8 score
+    ) external;
+
+    function getCoverageReports(uint256 screenplayId)
+        external view returns (CoverageReport[] memory);
+
+    function getElementScores(uint256 screenplayId, uint256 coverageIndex)
+        external view returns (ElementScores[] memory);
+}
+
+/**
+ * @title IRightsRegistry
+ * @dev Interface for the rights registry system
+ */
+interface IRightsRegistry {
+    struct RightDetails {
+        string rightType;
+        uint256 validFrom;
+        uint256 validUntil;
+        string[] territories;
+        string[] platforms;
+        address originalOwner;
+        uint256 parentRightId;
+        bool isExclusive;
+    }
+
+    struct RightTransfer {
+        uint256 rightId;
+        address from;
+        address to;
+        uint256 timestamp;
+        string transferType;
+        bytes signature;
+    }
+
+    event RightCreated(uint256 indexed rightId, string rightType, address owner);
+    event RightTransferred(uint256 indexed rightId, address from, address to, string transferType);
+    event RightRestrictionAdded(uint256 indexed rightId, string restrictionType, string details);
+
+    function createRight(
+        string memory rightType,
+        uint256 validFrom,
+        uint256 validUntil,
+        string[] memory territories,
+        string[] memory platforms,
+        bool isExclusive
+    ) external returns (uint256);
+
+    function transferRightWithSignature(
+        uint256 rightId,
+        address to,
+        string memory transferType,
+        bytes memory signature
+    ) external;
+
+    function verifyRightValidity(
+        uint256 rightId,
+        string memory territory,
+        string memory platform
+    ) external view returns (bool);
+
+    function getRightDetails(uint256 rightId)
+        external view returns (RightDetails memory);
+
+    function getTransferHistory(uint256 rightId)
+        external view returns (RightTransfer[] memory);
+}
+
+/**
+ * @title IChainOfTitle
+ * @dev Interface for chain of title tracking
+ */
+interface IChainOfTitle {
+    struct TitleEntry {
+        uint256 rightId;
+        uint256 documentId;
+        uint256 timestamp;
+        string entryType;
+        address recorder;
+        bytes32 previousEntryHash;
+    }
+
+    event TitleEntryAdded(
+        uint256 indexed rightId,
+        uint256 documentId,
+        string entryType,
+        bytes32 entryHash
+    );
+
+    function addTitleEntry(
+        uint256 rightId,
+        uint256 documentId,
+        string memory entryType
+    ) external;
+
+    function getTitleChain(uint256 rightId)
+        external view returns (TitleEntry[] memory);
+
+    function verifyTitleChain(uint256 rightId)
+        external view returns (bool);
+
+    function getLatestEntryHash(uint256 rightId)
+        external view returns (bytes32);
+}
+
+/**
+ * @title IContractFactory
+ * @dev Interface for contract deployment and management
+ */
+interface IContractFactory {
+    event ContractCreated(address indexed contractAddress, string contractType);
+    
+    function createScreenplayRights() external returns (address);
+    function createCoverageRegistry() external returns (address);
+    function createRightsRegistry() external returns (address);
+    function createChainOfTitle() external returns (address);
+    function isRegisteredContract(address contractAddress) external view returns (bool);
+}
+
+/**
+ * @title IRightsManager
+ * @dev Interface for the main rights management system
+ */
+interface IRightsManager {
+    struct RightsPackage {
+        uint256[] rightIds;
+        string packageType;
+        uint256 validFrom;
+        uint256 validUntil;
+        string[] territories;
+        string[] platforms;
+    }
+
+    event PackageCreated(uint256 indexed packageId, string packageType);
+    event RightAddedToPackage(uint256 indexed packageId, uint256 rightId);
+    event PackageTransferred(uint256 indexed packageId, address from, address to);
+
+    function createRightsPackage(
+        string memory packageType,
+        uint256[] memory rightIds,
+        uint256 validFrom,
+        uint256 validUntil,
+        string[] memory territories,
+        string[] memory platforms
+    ) external returns (uint256);
+
+    function addRightToPackage(uint256 packageId, uint256 rightId) external;
+    
+    function transferPackage(uint256 packageId, address to) external;
+    
+    function getPackageDetails(uint256 packageId)
+        external view returns (RightsPackage memory);
+
+    function validatePackage(uint256 packageId)
+        external view returns (bool);
+}
