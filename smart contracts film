@@ -1,0 +1,211 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+
+/**
+ * @title LegalDocument
+ * @dev Manages legal documents as NFTs with metadata and access control
+ */
+contract LegalDocument is ERC721, AccessControl, Pausable {
+    using Counters for Counters.Counter;
+    
+    bytes32 public constant LEGAL_ADMIN_ROLE = keccak256("LEGAL_ADMIN_ROLE");
+    bytes32 public constant REVIEWER_ROLE = keccak256("REVIEWER_ROLE");
+    
+    Counters.Counter private _documentIds;
+    
+    struct Document {
+        string documentHash;           // IPFS hash of the document
+        string documentType;           // Type (title report, copyright report, etc.)
+        uint256 creationDate;         // Timestamp of creation
+        uint256 expirationDate;       // Expiration date if applicable
+        address creator;              // Address of document creator
+        bool isApproved;              // Approval status
+        mapping(address => bool) authorizedUsers;  // Access control list
+    }
+    
+    // Mapping from document ID to Document struct
+    mapping(uint256 => Document) public documents;
+    
+    // Events
+    event DocumentCreated(uint256 indexed documentId, string documentType, address creator);
+    event DocumentApproved(uint256 indexed documentId, address approver);
+    event AccessGranted(uint256 indexed documentId, address user);
+    event AccessRevoked(uint256 indexed documentId, address user);
+    
+    constructor() ERC721("Legal Document", "LDOC") {
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(LEGAL_ADMIN_ROLE, msg.sender);
+    }
+    
+    /**
+     * @dev Creates a new legal document
+     * @param documentHash IPFS hash of the document
+     * @param documentType Type of the legal document
+     * @param expirationDate Optional expiration date
+     */
+    function createDocument(
+        string memory documentHash,
+        string memory documentType,
+        uint256 expirationDate
+    ) public whenNotPaused returns (uint256) {
+        require(hasRole(LEGAL_ADMIN_ROLE, msg.sender), "Must have legal admin role");
+        
+        _documentIds.increment();
+        uint256 newDocumentId = _documentIds.current();
+        
+        Document storage newDoc = documents[newDocumentId];
+        newDoc.documentHash = documentHash;
+        newDoc.documentType = documentType;
+        newDoc.creationDate = block.timestamp;
+        newDoc.expirationDate = expirationDate;
+        newDoc.creator = msg.sender;
+        newDoc.isApproved = false;
+        
+        _safeMint(msg.sender, newDocumentId);
+        
+        emit DocumentCreated(newDocumentId, documentType, msg.sender);
+        
+        return newDocumentId;
+    }
+    
+    /**
+     * @dev Approves a document after review
+     * @param documentId ID of the document to approve
+     */
+    function approveDocument(uint256 documentId) public whenNotPaused {
+        require(hasRole(REVIEWER_ROLE, msg.sender), "Must have reviewer role");
+        require(_exists(documentId), "Document does not exist");
+        
+        documents[documentId].isApproved = true;
+        emit DocumentApproved(documentId, msg.sender);
+    }
+    
+    /**
+     * @dev Grants access to a specific user for a document
+     * @param documentId ID of the document
+     * @param user Address of the user to grant access
+     */
+    function grantAccess(uint256 documentId, address user) public whenNotPaused {
+        require(_isApprovedOrOwner(msg.sender, documentId), "Not document owner/approved");
+        documents[documentId].authorizedUsers[user] = true;
+        emit AccessGranted(documentId, user);
+    }
+    
+    /**
+     * @dev Revokes access from a specific user for a document
+     * @param documentId ID of the document
+     * @param user Address of the user to revoke access
+     */
+    function revokeAccess(uint256 documentId, address user) public whenNotPaused {
+        require(_isApprovedOrOwner(msg.sender, documentId), "Not document owner/approved");
+        documents[documentId].authorizedUsers[user] = false;
+        emit AccessRevoked(documentId, user);
+    }
+    
+    /**
+     * @dev Checks if a user has access to a document
+     * @param documentId ID of the document
+     * @param user Address of the user to check
+     */
+    function hasAccess(uint256 documentId, address user) public view returns (bool) {
+        return documents[documentId].authorizedUsers[user] ||
+               _isApprovedOrOwner(user, documentId);
+    }
+}
+
+/**
+ * @title ClearanceWorkflow
+ * @dev Manages the clearance workflow process for legal documents
+ */
+contract ClearanceWorkflow {
+    struct ClearanceRequest {
+        uint256 documentId;           // ID of the document requiring clearance
+        address requestor;            // Address of the requestor
+        string clearanceType;         // Type of clearance needed
+        uint256 requestDate;          // Date of request
+        ClearanceStatus status;       // Current status
+        string[] requirements;        // List of requirements
+        mapping(string => bool) completedRequirements;  // Tracking completed requirements
+    }
+    
+    enum ClearanceStatus { Pending, InReview, Approved, Rejected }
+    
+    mapping(uint256 => ClearanceRequest) public clearanceRequests;
+    uint256 private _requestCounter;
+    
+    // Events
+    event ClearanceRequested(uint256 indexed requestId, uint256 documentId, address requestor);
+    event RequirementCompleted(uint256 indexed requestId, string requirement);
+    event ClearanceStatusUpdated(uint256 indexed requestId, ClearanceStatus status);
+    
+    /**
+     * @dev Creates a new clearance request
+     * @param documentId ID of the document
+     * @param clearanceType Type of clearance needed
+     * @param requirements List of requirements to be met
+     */
+    function createClearanceRequest(
+        uint256 documentId,
+        string memory clearanceType,
+        string[] memory requirements
+    ) public returns (uint256) {
+        _requestCounter++;
+        uint256 requestId = _requestCounter;
+        
+        ClearanceRequest storage request = clearanceRequests[requestId];
+        request.documentId = documentId;
+        request.requestor = msg.sender;
+        request.clearanceType = clearanceType;
+        request.requestDate = block.timestamp;
+        request.status = ClearanceStatus.Pending;
+        request.requirements = requirements;
+        
+        emit ClearanceRequested(requestId, documentId, msg.sender);
+        
+        return requestId;
+    }
+    
+    /**
+     * @dev Marks a requirement as completed
+     * @param requestId ID of the clearance request
+     * @param requirement Requirement that was completed
+     */
+    function completeRequirement(uint256 requestId, string memory requirement) public {
+        ClearanceRequest storage request = clearanceRequests[requestId];
+        require(request.requestor == msg.sender, "Only requestor can complete requirements");
+        
+        request.completedRequirements[requirement] = true;
+        emit RequirementCompleted(requestId, requirement);
+    }
+    
+    /**
+     * @dev Updates the status of a clearance request
+     * @param requestId ID of the clearance request
+     * @param status New status
+     */
+    function updateClearanceStatus(uint256 requestId, ClearanceStatus status) public {
+        // Add appropriate access control here
+        clearanceRequests[requestId].status = status;
+        emit ClearanceStatusUpdated(requestId, status);
+    }
+    
+    /**
+     * @dev Checks if all requirements for a clearance request are completed
+     * @param requestId ID of the clearance request
+     */
+    function areAllRequirementsCompleted(uint256 requestId) public view returns (bool) {
+        ClearanceRequest storage request = clearanceRequests[requestId];
+        
+        for (uint i = 0; i < request.requirements.length; i++) {
+            if (!request.completedRequirements[request.requirements[i]]) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
