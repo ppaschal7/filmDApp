@@ -1,0 +1,366 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+
+/**
+ * @title IRightsRegistry
+ * @dev Interface for the rights management system
+ */
+interface IRightsRegistry {
+    function verifyRights(uint256 rightId, address claimer) external view returns (bool);
+    function transferRights(uint256 rightId, address to) external;
+    function getRightDetails(uint256 rightId) external view returns (RightDetails memory);
+}
+
+/**
+ * @title ILegalDocument
+ * @dev Interface for legal document interaction
+ */
+interface ILegalDocument {
+    function verifyDocument(uint256 documentId) external view returns (bool);
+    function getDocumentHash(uint256 documentId) external view returns (string memory);
+}
+
+/**
+ * @title RightsRegistry
+ * @dev Manages entertainment rights and their transfers
+ */
+contract RightsRegistry is ERC1155, ReentrancyGuard {
+    using ECDSA for bytes32;
+
+    struct RightDetails {
+        string rightType;          // e.g., "copyright", "distribution", "adaptation"
+        uint256 validFrom;
+        uint256 validUntil;
+        string[] territories;      // Valid territories for the right
+        string[] platforms;        // Valid platforms for the right
+        address originalOwner;
+        uint256 parentRightId;    // For derivative rights
+        bool isExclusive;
+        mapping(string => string) restrictions; // Additional restrictions
+    }
+
+    struct RightTransfer {
+        uint256 rightId;
+        address from;
+        address to;
+        uint256 timestamp;
+        string transferType;       // e.g., "full", "limited", "license"
+        bytes signature;
+    }
+
+    mapping(uint256 => RightDetails) public rights;
+    mapping(uint256 => RightTransfer[]) public rightTransferHistory;
+    
+    // Territory and platform registries
+    mapping(string => bool) public validTerritories;
+    mapping(string => bool) public validPlatforms;
+    
+    uint256 private _rightIdCounter;
+
+    event RightCreated(uint256 indexed rightId, string rightType, address owner);
+    event RightTransferred(uint256 indexed rightId, address from, address to, string transferType);
+    event RightRestrictionAdded(uint256 indexed rightId, string restrictionType, string details);
+
+    constructor() ERC1155("https://api.example.com/rights/{id}.json") {
+        // Initialize valid territories and platforms
+        validTerritories["GLOBAL"] = true;
+        validPlatforms["ALL"] = true;
+    }
+
+    /**
+     * @dev Creates a new right
+     * @param rightType Type of right being created
+     * @param validFrom Start date of validity
+     * @param validUntil End date of validity
+     * @param territories Array of valid territories
+     * @param platforms Array of valid platforms
+     * @param isExclusive Whether the right is exclusive
+     */
+    function createRight(
+        string memory rightType,
+        uint256 validFrom,
+        uint256 validUntil,
+        string[] memory territories,
+        string[] memory platforms,
+        bool isExclusive
+    ) public nonReentrant returns (uint256) {
+        _rightIdCounter++;
+        uint256 newRightId = _rightIdCounter;
+
+        RightDetails storage newRight = rights[newRightId];
+        newRight.rightType = rightType;
+        newRight.validFrom = validFrom;
+        newRight.validUntil = validUntil;
+        newRight.territories = territories;
+        newRight.platforms = platforms;
+        newRight.originalOwner = msg.sender;
+        newRight.isExclusive = isExclusive;
+
+        _mint(msg.sender, newRightId, 1, "");
+
+        emit RightCreated(newRightId, rightType, msg.sender);
+        return newRightId;
+    }
+
+    /**
+     * @dev Transfers rights with verification
+     * @param rightId ID of the right being transferred
+     * @param to Recipient address
+     * @param transferType Type of transfer
+     * @param signature Signed message confirming transfer
+     */
+    function transferRightWithSignature(
+        uint256 rightId,
+        address to,
+        string memory transferType,
+        bytes memory signature
+    ) public nonReentrant {
+        require(_exists(rightId), "Right does not exist");
+        require(verifyRightTransferSignature(rightId, to, signature), "Invalid signature");
+
+        RightTransfer memory transfer = RightTransfer({
+            rightId: rightId,
+            from: msg.sender,
+            to: to,
+            timestamp: block.timestamp,
+            transferType: transferType,
+            signature: signature
+        });
+
+        rightTransferHistory[rightId].push(transfer);
+        
+        // Handle transfer based on type
+        if (keccak256(bytes(transferType)) == keccak256(bytes("full"))) {
+            safeTransferFrom(msg.sender, to, rightId, 1, "");
+        } else if (keccak256(bytes(transferType)) == keccak256(bytes("license"))) {
+            // Create new licensed right
+            _createLicensedRight(rightId, to);
+        }
+
+        emit RightTransferred(rightId, msg.sender, to, transferType);
+    }
+
+    /**
+     * @dev Creates a licensed right from an existing right
+     * @param parentRightId ID of the parent right
+     * @param licensee Address of the licensee
+     */
+    function _createLicensedRight(uint256 parentRightId, address licensee) private returns (uint256) {
+        RightDetails storage parentRight = rights[parentRightId];
+        
+        _rightIdCounter++;
+        uint256 newRightId = _rightIdCounter;
+        
+        RightDetails storage newRight = rights[newRightId];
+        newRight.rightType = string(abi.encodePacked(parentRight.rightType, "_LICENSE"));
+        newRight.validFrom = block.timestamp;
+        newRight.validUntil = parentRight.validUntil;
+        newRight.territories = parentRight.territories;
+        newRight.platforms = parentRight.platforms;
+        newRight.originalOwner = licensee;
+        newRight.parentRightId = parentRightId;
+        newRight.isExclusive = false;
+
+        _mint(licensee, newRightId, 1, "");
+        
+        return newRightId;
+    }
+
+    /**
+     * @dev Verifies if a right is valid for a specific territory and platform
+     * @param rightId ID of the right to verify
+     * @param territory Territory to check
+     * @param platform Platform to check
+     */
+    function verifyRightValidity(
+        uint256 rightId,
+        string memory territory,
+        string memory platform
+    ) public view returns (bool) {
+        RightDetails storage right = rights[rightId];
+        
+        // Check if right has expired
+        if (block.timestamp > right.validUntil) {
+            return false;
+        }
+
+        // Check territory validity
+        bool territoryValid = false;
+        for (uint i = 0; i < right.territories.length; i++) {
+            if (keccak256(bytes(right.territories[i])) == keccak256(bytes(territory)) ||
+                keccak256(bytes(right.territories[i])) == keccak256(bytes("GLOBAL"))) {
+                territoryValid = true;
+                break;
+            }
+        }
+
+        // Check platform validity
+        bool platformValid = false;
+        for (uint i = 0; i < right.platforms.length; i++) {
+            if (keccak256(bytes(right.platforms[i])) == keccak256(bytes(platform)) ||
+                keccak256(bytes(right.platforms[i])) == keccak256(bytes("ALL"))) {
+                platformValid = true;
+                break;
+            }
+        }
+
+        return territoryValid && platformValid;
+    }
+
+    /**
+     * @dev Adds a restriction to a right
+     * @param rightId ID of the right
+     * @param restrictionType Type of restriction
+     * @param details Details of the restriction
+     */
+    function addRightRestriction(
+        uint256 rightId,
+        string memory restrictionType,
+        string memory details
+    ) public {
+        require(_exists(rightId), "Right does not exist");
+        require(msg.sender == rights[rightId].originalOwner, "Not right owner");
+
+        rights[rightId].restrictions[restrictionType] = details;
+        emit RightRestrictionAdded(rightId, restrictionType, details);
+    }
+
+    /**
+     * @dev Verifies a right transfer signature
+     * @param rightId ID of the right being transferred
+     * @param to Recipient address
+     * @param signature Signature to verify
+     */
+    function verifyRightTransferSignature(
+        uint256 rightId,
+        address to,
+        bytes memory signature
+    ) public view returns (bool) {
+        bytes32 messageHash = keccak256(abi.encodePacked(rightId, to, block.timestamp));
+        bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
+        address signer = ethSignedMessageHash.recover(signature);
+        return signer == msg.sender;
+    }
+
+    /**
+     * @dev Checks if a right exists
+     * @param rightId ID of the right to check
+     */
+    function _exists(uint256 rightId) internal view returns (bool) {
+        return rights[rightId].originalOwner != address(0);
+    }
+}
+
+/**
+ * @title ChainOfTitle
+ * @dev Manages the chain of title for entertainment properties
+ */
+contract ChainOfTitle {
+    struct TitleEntry {
+        uint256 rightId;
+        uint256 documentId;
+        uint256 timestamp;
+        string entryType;
+        address recorder;
+        bytes32 previousEntryHash;
+    }
+
+    mapping(uint256 => TitleEntry[]) public titleChain;
+    mapping(uint256 => bytes32) public latestEntryHash;
+
+    IRightsRegistry public rightsRegistry;
+    ILegalDocument public legalDocument;
+
+    event TitleEntryAdded(
+        uint256 indexed rightId,
+        uint256 documentId,
+        string entryType,
+        bytes32 entryHash
+    );
+
+    constructor(address _rightsRegistry, address _legalDocument) {
+        rightsRegistry = IRightsRegistry(_rightsRegistry);
+        legalDocument = ILegalDocument(_legalDocument);
+    }
+
+    /**
+     * @dev Adds a new entry to the chain of title
+     * @param rightId ID of the right
+     * @param documentId ID of the supporting document
+     * @param entryType Type of entry
+     */
+    function addTitleEntry(
+        uint256 rightId,
+        uint256 documentId,
+        string memory entryType
+    ) public {
+        require(legalDocument.verifyDocument(documentId), "Invalid document");
+
+        bytes32 previousHash = latestEntryHash[rightId];
+        
+        TitleEntry memory newEntry = TitleEntry({
+            rightId: rightId,
+            documentId: documentId,
+            timestamp: block.timestamp,
+            entryType: entryType,
+            recorder: msg.sender,
+            previousEntryHash: previousHash
+        });
+
+        bytes32 newEntryHash = keccak256(abi.encodePacked(
+            rightId,
+            documentId,
+            block.timestamp,
+            entryType,
+            msg.sender,
+            previousHash
+        ));
+
+        titleChain[rightId].push(newEntry);
+        latestEntryHash[rightId] = newEntryHash;
+
+        emit TitleEntryAdded(rightId, documentId, entryType, newEntryHash);
+    }
+
+    /**
+     * @dev Gets the complete chain of title for a right
+     * @param rightId ID of the right
+     */
+    function getTitleChain(uint256 rightId) public view returns (TitleEntry[] memory) {
+        return titleChain[rightId];
+    }
+
+    /**
+     * @dev Verifies the integrity of the chain of title
+     * @param rightId ID of the right to verify
+     */
+    function verifyTitleChain(uint256 rightId) public view returns (bool) {
+        TitleEntry[] memory chain = titleChain[rightId];
+        if (chain.length == 0) return false;
+
+        bytes32 calculatedHash = bytes32(0);
+        
+        for (uint i = 0; i < chain.length; i++) {
+            TitleEntry memory entry = chain[i];
+            
+            // Verify that previous hash matches
+            require(entry.previousEntryHash == calculatedHash, "Chain integrity broken");
+            
+            // Calculate new hash
+            calculatedHash = keccak256(abi.encodePacked(
+                entry.rightId,
+                entry.documentId,
+                entry.timestamp,
+                entry.entryType,
+                entry.recorder,
+                entry.previousEntryHash
+            ));
+        }
+
+        return calculatedHash == latestEntryHash[rightId];
+    }
+}
